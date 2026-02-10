@@ -1,92 +1,106 @@
 /**
- * Vercel Serverless Entry Point for the Fastify API
+ * Vercel Serverless Function — plain Node.js handler (no Fastify)
  *
- * Vercel runs serverless functions (not long-running servers),
- * so we export the Fastify app as a handler that Vercel can call.
+ * Vercel serverless functions receive standard (req, res) objects.
+ * We parse the URL and route manually to keep it simple.
  */
 
-import Fastify from "fastify";
-import cors from "@fastify/cors";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import {
-    encryptPayload,
-    decryptPayload,
-    type TxSecureRecord,
-} from "@secure-tx/crypto";
+import { encryptPayload, decryptPayload } from "@secure-tx/crypto";
+import type { TxSecureRecord } from "@secure-tx/crypto";
 
-// ─── Master Key ─────────────────────────────────────────
-const MASTER_KEY_HEX =
-    process.env.MASTER_KEY || randomBytes(32).toString("hex");
+// ─── Master Key ──────────────────────────────────────────
+const MASTER_KEY_HEX = process.env.MASTER_KEY || randomBytes(32).toString("hex");
 const MASTER_KEY = Buffer.from(MASTER_KEY_HEX, "hex");
 
 // ─── In-Memory Storage ──────────────────────────────────
 const store = new Map<string, TxSecureRecord>();
 
-// ─── Build the Fastify app ──────────────────────────────
-const app = Fastify({ logger: true });
+// ─── Helpers ─────────────────────────────────────────────
 
-await app.register(cors, { origin: true });
+function sendJSON(res: ServerResponse, status: number, data: unknown) {
+    res.writeHead(status, {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    });
+    res.end(JSON.stringify(data));
+}
 
-// Health
-app.get("/api/health", async () => ({ status: "ok" }));
+function parseBody(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+        req.on("end", () => resolve(body));
+        req.on("error", reject);
+    });
+}
 
-// POST /api/tx/encrypt
-app.post<{
-    Body: { partyId: string; payload: Record<string, unknown> };
-}>("/api/tx/encrypt", async (request, reply) => {
-    const { partyId, payload } = request.body;
+// ─── Main Handler ────────────────────────────────────────
 
-    if (!partyId || typeof partyId !== "string") {
-        return reply.status(400).send({ error: "partyId is required (string)" });
-    }
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-        return reply.status(400).send({ error: "payload is required (JSON object)" });
-    }
+export default async function handler(req: IncomingMessage, res: ServerResponse) {
+    const url = req.url || "/";
+    const method = req.method || "GET";
 
-    try {
-        const record = encryptPayload({ partyId, payload }, MASTER_KEY);
-        store.set(record.id, record);
-        return reply.status(201).send(record);
-    } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "Encryption failed";
-        return reply.status(500).send({ error: message });
-    }
-});
-
-// GET /api/tx/:id
-app.get<{ Params: { id: string } }>("/api/tx/:id", async (request, reply) => {
-    const { id } = request.params;
-    const record = store.get(id);
-
-    if (!record) {
-        return reply.status(404).send({ error: "Record not found" });
+    // Handle CORS preflight
+    if (method === "OPTIONS") {
+        return sendJSON(res, 200, {});
     }
 
-    return reply.send(record);
-});
+    // GET /health or /api/health
+    if (url.match(/\/?health$/) && method === "GET") {
+        return sendJSON(res, 200, { status: "ok" });
+    }
 
-// POST /api/tx/:id/decrypt
-app.post<{ Params: { id: string } }>(
-    "/api/tx/:id/decrypt",
-    async (request, reply) => {
-        const { id } = request.params;
-        const record = store.get(id);
+    // POST /tx/encrypt or /api/tx/encrypt
+    if (url.match(/\/?tx\/encrypt$/) && method === "POST") {
+        try {
+            const raw = await parseBody(req);
+            const { partyId, payload } = JSON.parse(raw);
 
-        if (!record) {
-            return reply.status(404).send({ error: "Record not found" });
+            if (!partyId || typeof partyId !== "string") {
+                return sendJSON(res, 400, { error: "partyId is required (string)" });
+            }
+            if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+                return sendJSON(res, 400, { error: "payload is required (JSON object)" });
+            }
+
+            const record = encryptPayload({ partyId, payload }, MASTER_KEY);
+            store.set(record.id, record);
+            return sendJSON(res, 201, record);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : "Encryption failed";
+            return sendJSON(res, 500, { error: msg });
         }
+    }
+
+    // Match /tx/:id/decrypt or /api/tx/:id/decrypt
+    const decryptMatch = url.match(/\/?tx\/([^/]+)\/decrypt$/);
+    if (decryptMatch && method === "POST") {
+        const id = decryptMatch[1];
+        const record = store.get(id);
+        if (!record) return sendJSON(res, 404, { error: "Record not found" });
 
         try {
             const result = decryptPayload(record, MASTER_KEY);
-            return reply.send(result);
+            return sendJSON(res, 200, result);
         } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : "Decryption failed";
-            return reply.status(400).send({ error: message });
+            const msg = err instanceof Error ? err.message : "Decryption failed";
+            return sendJSON(res, 400, { error: msg });
         }
     }
-);
 
-export default async function handler(req: any, res: any) {
-    await app.ready();
-    app.server.emit("request", req, res);
+    // Match /tx/:id or /api/tx/:id
+    const getMatch = url.match(/\/?tx\/([^/]+)$/);
+    if (getMatch && method === "GET") {
+        const id = getMatch[1];
+        const record = store.get(id);
+        if (!record) return sendJSON(res, 404, { error: "Record not found" });
+        return sendJSON(res, 200, record);
+    }
+
+    // Fallback
+    return sendJSON(res, 404, { error: "Not found" });
 }
