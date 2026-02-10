@@ -1,5 +1,9 @@
 {
     "$schema": "https://turbo.build/schema.json",
+    "globalPassThroughEnv": [
+        "MASTER_KEY",
+        "NEXT_PUBLIC_API_URL"
+    ],
     "tasks": {
         "build": {
             "dependsOn": [
