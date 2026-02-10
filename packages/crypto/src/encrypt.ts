@@ -1,17 +1,3 @@
-/**
- * Encrypt a JSON payload using Envelope Encryption (AES-256-GCM)
- *
- * What is Envelope Encryption?
- * ----------------------------
- * Instead of encrypting data directly with the master key, we:
- *   1. Create a temporary random key (called DEK = Data Encryption Key)
- *   2. Use the DEK to encrypt the actual data
- *   3. Use the Master Key to encrypt (wrap) the DEK
- *   4. Store the encrypted data + encrypted DEK together
- *
- * Why? This way, the master key is used minimally (only to wrap small DEKs),
- * reducing the risk of it being exposed.
- */
 
 import { randomBytes, createCipheriv } from "node:crypto";
 import type { TxSecureRecord, EncryptInput } from "./types.js";
@@ -38,7 +24,7 @@ function aes256gcmEncrypt(
     // Create the cipher with the key and nonce
     const cipher = createCipheriv("aes-256-gcm", key, nonce);
 
-    // Encrypt the plaintext
+    // Encrypt the plaintext and
     const encrypted = Buffer.concat([
         cipher.update(plaintext),
         cipher.final(),

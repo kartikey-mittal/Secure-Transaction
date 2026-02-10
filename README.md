@@ -1,6 +1,37 @@
-# Secure Transactions Mini-App
+# 🔐 Secure Transactions Mini-App
 
 A TurboRepo monorepo implementing a secure transaction service with **Envelope Encryption (AES-256-GCM)**.
+
+## 🌐 Live Demo
+
+| App | URL |
+|-----|-----|
+| **Web** | [secure-transaction-web.vercel.app](https://secure-transaction-web.vercel.app/) |
+| **API** | [secure-transaction-api.vercel.app](https://secure-transaction-api.vercel.app) |
+
+## 📸 Screenshot
+
+![Secure Tx Console](docs/screenshot.png)
+
+## 🔐 Encryption Flow
+
+```mermaid
+flowchart TD
+    A["🔑 User Input"] --> B["partyId + JSON Payload"]
+    B --> C{"🎲 Generate Random DEK\n(32 bytes)"}
+    C --> D["DEK (Data Encryption Key)"]
+    D --> E["AES-256-GCM\nEncrypt(DEK, Payload)"]
+    E --> G["📦 payload_ct (ciphertext)"]
+    E --> H["🔢 payload_nonce (12 bytes)"]
+    E --> I["🏷️ payload_tag (16 bytes)"]
+    D --> K["🔐 Master Key (from env)"]
+    K --> L["AES-256-GCM\nEncrypt(MasterKey, DEK)"]
+    L --> M["🔒 dek_wrapped (encrypted DEK)"]
+    L --> N["🔢 dek_wrap_nonce (12 bytes)"]
+    L --> O["🏷️ dek_wrap_tag (16 bytes)"]
+    G & H & I & M & N & O --> P{"📋 Combine into\nTxSecureRecord"}
+    P --> Q["✅ Stored as Hex Strings"]
+```
 
 ## 📁 Project Structure
 
@@ -79,8 +110,11 @@ pnpm test
 
 ## 🚀 Deployment
 
-Both apps deploy to **Vercel**:
-- Web: `vercel --cwd apps/web`
-- API: `vercel --cwd apps/api`
+Both apps are deployed to **Vercel**:
 
-Set `MASTER_KEY` as an environment variable in Vercel dashboard.
+| App | Root Directory | Framework |
+|-----|---------------|-----------|
+| Web | `apps/web` | Next.js |
+| API | `apps/api` | Serverless (Node.js) |
+
+Set `MASTER_KEY` and `NEXT_PUBLIC_API_URL` as environment variables in Vercel dashboard.
