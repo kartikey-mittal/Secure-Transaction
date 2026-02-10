@@ -1,0 +1,21 @@
+{
+    "name": "@secure-tx/api",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "tsx watch src/server.ts",
+        "build": "tsc",
+        "start": "node dist/server.js"
+    },
+    "dependencies": {
+        "@fastify/cors": "^10.0.0",
+        "fastify": "^5.2.0",
+        "@secure-tx/crypto": "workspace:*"
+    },
+    "devDependencies": {
+        "tsx": "^4.19.0",
+        "typescript": "^5.7.0",
+        "@types/node": "^22.0.0"
+    }
+}
