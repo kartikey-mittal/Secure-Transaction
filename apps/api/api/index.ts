@@ -1,25 +1,91 @@
 /**
- * Vercel Serverless Function — plain Node.js handler (no Fastify)
+ * Vercel Serverless Function — Secure Transactions API
  *
- * Vercel serverless functions receive standard (req, res) objects.
- * We parse the URL and route manually to keep it simple.
+ * All crypto logic is inlined here so Vercel doesn't need
+ * to resolve workspace packages.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomBytes } from "node:crypto";
-import { encryptPayload, decryptPayload } from "@secure-tx/crypto";
-import type { TxSecureRecord } from "@secure-tx/crypto";
+import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 
-// ─── Master Key ──────────────────────────────────────────
-const MASTER_KEY_HEX = process.env.MASTER_KEY || randomBytes(32).toString("hex");
-const MASTER_KEY = Buffer.from(MASTER_KEY_HEX, "hex");
+// ─── Types ───────────────────────────────────────────────
 
-// ─── In-Memory Storage ──────────────────────────────────
+interface TxSecureRecord {
+    id: string;
+    partyId: string;
+    createdAt: string;
+    payload_nonce: string;
+    payload_ct: string;
+    payload_tag: string;
+    dek_wrap_nonce: string;
+    dek_wrapped: string;
+    dek_wrap_tag: string;
+    alg: "AES-256-GCM";
+    mk_version: 1;
+}
+
+// ─── Crypto Helpers ──────────────────────────────────────
+
+function aesEncrypt(key: Buffer, plaintext: Buffer) {
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return { ct, nonce, tag };
+}
+
+function aesDecrypt(key: Buffer, nonce: Buffer, ct: Buffer, tag: Buffer) {
+    const decipher = createDecipheriv("aes-256-gcm", key, nonce);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ct), decipher.final()]);
+}
+
+function encryptPayload(partyId: string, payload: object, masterKey: Buffer): TxSecureRecord {
+    const dek = randomBytes(32);
+    const payloadBuf = Buffer.from(JSON.stringify(payload), "utf-8");
+    const enc = aesEncrypt(dek, payloadBuf);
+    const wrap = aesEncrypt(masterKey, dek);
+
+    return {
+        id: randomBytes(16).toString("hex"),
+        partyId,
+        createdAt: new Date().toISOString(),
+        payload_nonce: enc.nonce.toString("hex"),
+        payload_ct: enc.ct.toString("hex"),
+        payload_tag: enc.tag.toString("hex"),
+        dek_wrap_nonce: wrap.nonce.toString("hex"),
+        dek_wrapped: wrap.ct.toString("hex"),
+        dek_wrap_tag: wrap.tag.toString("hex"),
+        alg: "AES-256-GCM",
+        mk_version: 1,
+    };
+}
+
+function decryptPayload(record: TxSecureRecord, masterKey: Buffer) {
+    const dek = aesDecrypt(
+        masterKey,
+        Buffer.from(record.dek_wrap_nonce, "hex"),
+        Buffer.from(record.dek_wrapped, "hex"),
+        Buffer.from(record.dek_wrap_tag, "hex")
+    );
+    const plain = aesDecrypt(
+        dek,
+        Buffer.from(record.payload_nonce, "hex"),
+        Buffer.from(record.payload_ct, "hex"),
+        Buffer.from(record.payload_tag, "hex")
+    );
+    return JSON.parse(plain.toString("utf-8"));
+}
+
+// ─── Master Key & Storage ────────────────────────────────
+
+const MK_HEX = process.env.MASTER_KEY || randomBytes(32).toString("hex");
+const MASTER_KEY = Buffer.from(MK_HEX, "hex");
 const store = new Map<string, TxSecureRecord>();
 
-// ─── Helpers ─────────────────────────────────────────────
+// ─── HTTP Helpers ────────────────────────────────────────
 
-function sendJSON(res: ServerResponse, status: number, data: unknown) {
+function send(res: ServerResponse, status: number, data: unknown) {
     res.writeHead(status, {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
@@ -29,78 +95,70 @@ function sendJSON(res: ServerResponse, status: number, data: unknown) {
     res.end(JSON.stringify(data));
 }
 
-function parseBody(req: IncomingMessage): Promise<string> {
+function body(req: IncomingMessage): Promise<string> {
     return new Promise((resolve, reject) => {
-        let body = "";
-        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
-        req.on("end", () => resolve(body));
+        let d = "";
+        req.on("data", (c: Buffer) => (d += c.toString()));
+        req.on("end", () => resolve(d));
         req.on("error", reject);
     });
 }
 
-// ─── Main Handler ────────────────────────────────────────
+// ─── Handler ─────────────────────────────────────────────
 
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
     const url = req.url || "/";
     const method = req.method || "GET";
 
-    // Handle CORS preflight
-    if (method === "OPTIONS") {
-        return sendJSON(res, 200, {});
+    if (method === "OPTIONS") return send(res, 200, {});
+
+    // Health check
+    if (url.match(/\/?(api\/)?health$/) && method === "GET") {
+        return send(res, 200, { status: "ok" });
     }
 
-    // GET /health or /api/health
-    if (url.match(/\/?health$/) && method === "GET") {
-        return sendJSON(res, 200, { status: "ok" });
-    }
-
-    // POST /tx/encrypt or /api/tx/encrypt
-    if (url.match(/\/?tx\/encrypt$/) && method === "POST") {
+    // POST /tx/encrypt
+    if (url.match(/\/?(api\/)?tx\/encrypt$/) && method === "POST") {
         try {
-            const raw = await parseBody(req);
+            const raw = await body(req);
             const { partyId, payload } = JSON.parse(raw);
+            if (!partyId || typeof partyId !== "string")
+                return send(res, 400, { error: "partyId is required" });
+            if (!payload || typeof payload !== "object" || Array.isArray(payload))
+                return send(res, 400, { error: "payload must be a JSON object" });
 
-            if (!partyId || typeof partyId !== "string") {
-                return sendJSON(res, 400, { error: "partyId is required (string)" });
-            }
-            if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-                return sendJSON(res, 400, { error: "payload is required (JSON object)" });
-            }
-
-            const record = encryptPayload({ partyId, payload }, MASTER_KEY);
+            const record = encryptPayload(partyId, payload, MASTER_KEY);
             store.set(record.id, record);
-            return sendJSON(res, 201, record);
+            return send(res, 201, record);
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : "Encryption failed";
-            return sendJSON(res, 500, { error: msg });
+            return send(res, 500, { error: msg });
         }
     }
 
-    // Match /tx/:id/decrypt or /api/tx/:id/decrypt
-    const decryptMatch = url.match(/\/?tx\/([^/]+)\/decrypt$/);
+    // POST /tx/:id/decrypt (check before GET /tx/:id)
+    const decryptMatch = url.match(/\/?(api\/)?tx\/([^/]+)\/decrypt$/);
     if (decryptMatch && method === "POST") {
-        const id = decryptMatch[1];
+        const id = decryptMatch[2];
         const record = store.get(id);
-        if (!record) return sendJSON(res, 404, { error: "Record not found" });
-
+        if (!record) return send(res, 404, { error: "Record not found" });
         try {
             const result = decryptPayload(record, MASTER_KEY);
-            return sendJSON(res, 200, result);
+            return send(res, 200, { id: record.id, partyId: record.partyId, payload: result });
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : "Decryption failed";
-            return sendJSON(res, 400, { error: msg });
+            return send(res, 400, { error: msg });
         }
     }
 
-    // Match /tx/:id or /api/tx/:id
-    const getMatch = url.match(/\/?tx\/([^/]+)$/);
+    // GET /tx/:id
+    const getMatch = url.match(/\/?(api\/)?tx\/([^/]+)$/);
     if (getMatch && method === "GET") {
-        const id = getMatch[1];
+        const id = getMatch[2];
         const record = store.get(id);
-        if (!record) return sendJSON(res, 404, { error: "Record not found" });
-        return sendJSON(res, 200, record);
+        if (!record) return send(res, 404, { error: "Record not found" });
+        return send(res, 200, record);
     }
 
-    // Fallback
-    return sendJSON(res, 404, { error: "Not found" });
+    return send(res, 404, { error: "Not found" });
 }
